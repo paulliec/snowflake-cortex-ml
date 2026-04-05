@@ -1,18 +1,23 @@
 """Run predictions and write churn risk scores back to Silver."""
 
+import os
+
 import pandas as pd
 
-from pipeline.connection import get_connection
+from pipeline.connection import get_connection, use_ml_schema
 
 MODEL_NAME = "ATTRITION_CLASSIFIER"
 
 
 def predict(conn):
-    """Score test split and write risk scores back to Silver."""
-    print("  Running predictions on test split...")
+    """Score Gold rows and write risk scores back to Silver."""
+    print("  Running predictions (all Gold rows with features)...")
     cur = conn.cursor()
+    use_ml_schema(cur)
 
-    # predict on test set, get probability of churn (class 1)
+    db = os.environ.get("SNOWFLAKE_DATABASE", "ATTRITION_ML").strip().strip('"')
+
+    # score every row in Gold (train + test) so the dashboard has broad coverage
     cur.execute(f"""
         CREATE OR REPLACE TEMPORARY TABLE _PREDICTIONS AS
         SELECT
@@ -33,26 +38,36 @@ def predict(conn):
                     'EXIT_SURVEY_SENTIMENT', EXIT_SURVEY_SENTIMENT
                 )
             ) AS PREDICTION
-        FROM GOLD.EMPLOYEE_ML_READY
-        WHERE SPLIT = 'TEST'
+        FROM {db}.GOLD.EMPLOYEE_ML_READY
     """)
 
-    # write risk scores back to silver
-    cur.execute("""
-        UPDATE SILVER.EMPLOYEE_CLEANSED s
-        SET s.CHURN_RISK_SCORE = p.PREDICTION:"probability"::FLOAT
-        FROM _PREDICTIONS p
-        WHERE s.EMPLOYEE_ID = p.EMPLOYEE_ID
+    cur.execute("SELECT COUNT(*) FROM _PREDICTIONS")
+    n_pred = cur.fetchone()[0]
+    print(f"  Rows in _PREDICTIONS: {n_pred}")
+
+    # write risk scores back to Silver
+    cur.execute(f"""
+        MERGE INTO {db}.SILVER.EMPLOYEE_CLEANSED s
+        USING _PREDICTIONS p
+        ON s.EMPLOYEE_ID = p.EMPLOYEE_ID
+        WHEN MATCHED THEN UPDATE SET
+            s.CHURN_RISK_SCORE = p.PREDICTION:"probability":"1"::FLOAT
     """)
 
     updated = cur.rowcount
-    print(f"  Updated {updated} risk scores in Silver.")
+    print(f"  MERGE rows (Snowflake rowcount): {updated}")
+
+    cur.execute(f"""
+        SELECT COUNT(*) FROM {db}.SILVER.EMPLOYEE_CLEANSED WHERE CHURN_RISK_SCORE IS NOT NULL
+    """)
+    n_scored = cur.fetchone()[0]
+    print(f"  Silver rows with CHURN_RISK_SCORE set: {n_scored}")
 
     # show top 10 highest risk by role
-    cur.execute("""
+    cur.execute(f"""
         SELECT EMPLOYEE_ID, EMPLOYEE_NAME, ROLE, REGION,
                ROUND(CHURN_RISK_SCORE, 3) AS RISK_SCORE
-        FROM SILVER.EMPLOYEE_CLEANSED
+        FROM {db}.SILVER.EMPLOYEE_CLEANSED
         WHERE CHURN_RISK_SCORE IS NOT NULL
         ORDER BY CHURN_RISK_SCORE DESC
         LIMIT 10

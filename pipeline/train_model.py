@@ -1,8 +1,6 @@
 """Train a Cortex ML Classification model on the Gold feature set."""
 
-from snowflake.ml.modeling.classification import ClassificationExperiment
-
-from pipeline.connection import get_connection
+from pipeline.connection import get_connection, use_ml_schema
 
 MODEL_NAME = "ATTRITION_CLASSIFIER"
 TARGET = "CHURNED"
@@ -19,9 +17,9 @@ def train(conn):
     """Train classification model using Snowflake Cortex ML."""
     print("  Training Cortex ML Classification model...")
     cur = conn.cursor()
+    use_ml_schema(cur)
 
     # build model on TRAIN split
-    feature_list = ", ".join(FEATURE_COLS)
     cur.execute(f"""
         CREATE OR REPLACE SNOWFLAKE.ML.CLASSIFICATION {MODEL_NAME}(
             INPUT_DATA => SYSTEM$REFERENCE('TABLE', 'GOLD.EMPLOYEE_ML_READY'),
@@ -33,22 +31,23 @@ def train(conn):
     """)
     print(f"  Model '{MODEL_NAME}' created.")
 
-    # evaluate on test split
-    cur.execute(f"""
-        SELECT {MODEL_NAME}!SHOW_EVALUATION_METRICS()
-    """)
-    metrics = cur.fetchone()[0]
-    print(f"  Evaluation metrics:\n{metrics}")
+    # evaluation APIs are CALL ... (), not SELECT (see Snowflake ML classification docs)
+    cur.execute(f"CALL {MODEL_NAME}!SHOW_EVALUATION_METRICS()")
+    eval_rows = cur.fetchall()
+    eval_cols = [c[0] for c in cur.description]
+    print("  Evaluation metrics:")
+    for row in eval_rows:
+        print(f"    {dict(zip(eval_cols, row))}")
 
-    # feature importance
-    cur.execute(f"""
-        SELECT {MODEL_NAME}!SHOW_FEATURE_IMPORTANCE()
-    """)
-    importance = cur.fetchone()[0]
-    print(f"\n  Feature importance:\n{importance}")
+    cur.execute(f"CALL {MODEL_NAME}!SHOW_FEATURE_IMPORTANCE()")
+    fi_rows = cur.fetchall()
+    fi_cols = [c[0] for c in cur.description]
+    print("\n  Feature importance:")
+    for row in fi_rows:
+        print(f"    {dict(zip(fi_cols, row))}")
 
     cur.close()
-    return metrics
+    return eval_rows
 
 
 def main():

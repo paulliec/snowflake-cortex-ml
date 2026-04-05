@@ -1,7 +1,7 @@
--- Attrition ML: database and medallion schema setup
--- Run once to initialize Snowflake objects
+-- Attrition ML: medallion schema setup (run once)
+-- Database ATTRITION_ML must already exist (CREATE DATABASE needs ACCOUNTADMIN)
+-- (or an admin must grant CREATE DATABASE). This script only builds schemas/tables.
 
-CREATE DATABASE IF NOT EXISTS ATTRITION_ML;
 USE DATABASE ATTRITION_ML;
 
 -- ============================================================
