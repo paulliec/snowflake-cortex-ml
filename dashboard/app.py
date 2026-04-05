@@ -52,6 +52,20 @@ def _title_case_values(s: pd.Series) -> pd.Series:
 _TITLE_CASE_COLS = {"ROLE", "DEPARTMENT", "REGION", "EMPLOYEE_NAME"}
 
 
+def _classify_risk(score):
+    """Assign risk tier, time window, and confidence band from churn score."""
+    if pd.isna(score):
+        return pd.Series(["—", "—", None, None])
+    if score >= 0.70:
+        band = 0.08
+        return pd.Series(["🔴 Act Now", "< 90 days", band, f"{score:.0%} ± 8%"])
+    if score >= 0.40:
+        band = 0.15
+        return pd.Series(["🟡 Early Warning", "3-6 months", band, f"{score:.0%} ± 15%"])
+    band = 0.20
+    return pd.Series(["🟢 Stable", "Stable", band, f"{score:.0%} ± 20%"])
+
+
 def _prepare_employee_df(df: pd.DataFrame) -> pd.DataFrame:
     """Normalize types so risk scores and churn flags work with Snowflake + pandas."""
     out = df.copy()
@@ -77,6 +91,12 @@ def _prepare_employee_df(df: pd.DataFrame) -> pd.DataFrame:
     for col in _TITLE_CASE_COLS:
         if col in out.columns:
             out[col] = _title_case_values(out[col])
+
+    # risk tiers and confidence bands
+    if "CHURN_RISK_SCORE" in out.columns:
+        tier_cols = out["CHURN_RISK_SCORE"].apply(_classify_risk)
+        tier_cols.columns = ["RISK_TIER", "TIME_WINDOW", "_BAND", "RISK_DISPLAY"]
+        out = pd.concat([out, tier_cols], axis=1)
 
     out.columns = [_pretty_col(c) for c in out.columns]
     return out
@@ -139,8 +159,16 @@ def load_feature_importance():
 # ============================================================
 page = st.sidebar.radio(
     "Navigation",
-    ["Overview", "At-Risk Employees", "Feature Importance", "Sentiment Analysis"],
+    ["Overview", "At-Risk Employees — Intervention Required",
+     "Feature Importance", "Sentiment Analysis"],
 )
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("Filters")
+_TIER_OPTIONS = ["All", "🔴 Act Now", "🟡 Early Warning", "🟢 Stable"]
+_TIME_OPTIONS = ["All", "< 90 days", "3-6 months", "Stable"]
+sidebar_tier = st.sidebar.selectbox("Risk Tier", _TIER_OPTIONS)
+sidebar_time = st.sidebar.selectbox("Time Window", _TIME_OPTIONS)
 
 st.sidebar.markdown("---")
 if st.sidebar.button("Refresh data"):
@@ -162,20 +190,31 @@ with st.sidebar.expander("Data check"):
 st.sidebar.caption("Attrition ML Pipeline v1.0")
 
 
+def _apply_sidebar_filters(df: pd.DataFrame) -> pd.DataFrame:
+    """Apply risk tier and time window sidebar filters."""
+    out = df
+    if sidebar_tier != "All" and "Risk Tier" in out.columns:
+        out = out[out["Risk Tier"] == sidebar_tier]
+    if sidebar_time != "All" and "Time Window" in out.columns:
+        out = out[out["Time Window"] == sidebar_time]
+    return out
+
+
 # ============================================================
 # Page 1: Overview
 # ============================================================
 if page == "Overview":
     st.title("Attrition Intelligence — Overview")
+    st.caption("Risk tiers: 🔴 Act Now (≥70%, <90 days) · 🟡 Early Warning (40-69%, 3-6 months) · 🟢 Stable (<40%)")
 
-    silver = load_silver()
+    silver = _apply_sidebar_filters(load_silver())
 
     col1, col2, col3, col4 = st.columns(4)
     total = len(silver)
     churned = silver[silver["Churned"] == "Y"]
     col1.metric("Total Employees", f"{total:,}")
     col2.metric("Churned", f"{len(churned):,}")
-    col3.metric("Churn Rate", f"{len(churned)/total:.1%}")
+    col3.metric("Churn Rate", f"{len(churned)/total:.1%}" if total else "—")
     scored = silver["Churn Risk Score"].notna().sum()
     col4.metric("Risk Scored", f"{scored:,}")
 
@@ -246,12 +285,61 @@ if page == "Overview":
             "(prediction step), then **Refresh data** here."
         )
 
+    # -- Workforce Impact Forecast --
+    st.markdown("---")
+    st.subheader("Expected Attrition by Role and Region")
+    st.caption("Confidence bands widen for lower-certainty tiers — ranges reflect model uncertainty")
+
+    _all_silver = load_silver()  # unfiltered for forecast
+    _forecast_df = _all_silver[_all_silver["Churn Risk Score"].notna()].copy()
+    if len(_forecast_df) > 0 and "Risk Tier" in _forecast_df.columns:
+        # thresholds: high>=0.70, med>=0.40
+        _tiers = [
+            ("🔴 Act Now", 0.70, 0.08, "Next 90 days"),
+            ("🟡 Early Warning", 0.40, 0.15, "3-6 months"),
+        ]
+        _forecast_rows = []
+        for tier_label, threshold, band, timeframe in _tiers:
+            for (role, region), grp in _forecast_df.groupby(["Role", "Region"]):
+                scores = grp["Churn Risk Score"]
+                high_est = int((scores >= (threshold - band)).sum())
+                low_est = int((scores >= (threshold + band)).sum())
+                point_est = int((scores >= threshold).sum())
+                if high_est == 0:
+                    continue
+                _forecast_rows.append({
+                    "Tier": tier_label,
+                    "Role": role,
+                    "Region": region,
+                    "Expected Loss (Low-High)": f"{low_est}-{high_est} employees",
+                    "Point Est.": point_est,
+                    "_high": high_est,
+                    "Timeframe": timeframe,
+                })
+
+        if _forecast_rows:
+            forecast_table = pd.DataFrame(_forecast_rows)
+            forecast_table = forecast_table.sort_values("_high", ascending=False)
+            st.dataframe(
+                forecast_table[["Tier", "Role", "Region", "Expected Loss (Low-High)", "Timeframe"]],
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Tier": st.column_config.TextColumn(width="small"),
+                },
+            )
+        else:
+            st.info("No employees meet current risk thresholds.")
+    else:
+        st.info("Risk scores required for workforce forecast.")
+
 
 # ============================================================
 # Page 2: At-Risk Employees
 # ============================================================
-elif page == "At-Risk Employees":
-    st.title("At-Risk Employees")
+elif page == "At-Risk Employees — Intervention Required":
+    st.title("At-Risk Employees — Intervention Required")
+    st.caption("Employees ranked by 90-Day Attrition Risk Score · confidence bands reflect prediction certainty per tier")
 
     silver = load_silver()
     scored = silver[silver["Churn Risk Score"].notna()].copy()
@@ -263,14 +351,14 @@ elif page == "At-Risk Employees":
         )
         st.stop()
 
-    # filters
+    # inline filters for role and region
     col1, col2 = st.columns(2)
     roles = ["All"] + sorted(scored["Role"].unique().tolist())
     regions = ["All"] + sorted(scored["Region"].unique().tolist())
     selected_role = col1.selectbox("Role", roles)
     selected_region = col2.selectbox("Region", regions)
 
-    filtered = scored
+    filtered = _apply_sidebar_filters(scored)
     if selected_role != "All":
         filtered = filtered[filtered["Role"] == selected_role]
     if selected_region != "All":
@@ -280,6 +368,7 @@ elif page == "At-Risk Employees":
 
     display_cols = [
         "Employee Id", "Employee Name", "Role", "Department", "Region",
+        "Risk Tier", "Time Window", "Risk Display",
         "Tenure Years", "Manager Rating", "Overtime Hours Monthly",
         "Days Since Last Raise", "Churn Risk Score",
     ]
@@ -290,11 +379,14 @@ elif page == "At-Risk Employees":
         height=700,
         column_config={
             "Churn Risk Score": st.column_config.ProgressColumn(
-                "Churn Risk",
+                "90-Day Attrition Risk",
                 min_value=0.0,
                 max_value=1.0,
                 format="%.3f",
             ),
+            "Risk Display": st.column_config.TextColumn("Score ± Band"),
+            "Risk Tier": st.column_config.TextColumn(width="small"),
+            "Time Window": st.column_config.TextColumn(width="small"),
         },
     )
 
@@ -306,6 +398,7 @@ elif page == "At-Risk Employees":
 # ============================================================
 elif page == "Feature Importance":
     st.title("Feature Importance — What Drives Attrition")
+    st.caption("Model feature weights — these factors have the strongest signal for 90-day attrition risk")
 
     fi = load_feature_importance()
     if fi is not None and len(fi) > 0:
@@ -345,6 +438,7 @@ elif page == "Feature Importance":
 # ============================================================
 elif page == "Sentiment Analysis":
     st.title("Exit Survey Sentiment Analysis")
+    st.caption("Post-separation survey analysis — informs future retention strategy, not current risk scoring")
 
     silver = load_silver()
     churned = silver[silver["Churned"] == "Y"].copy()
