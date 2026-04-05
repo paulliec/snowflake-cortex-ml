@@ -1,6 +1,7 @@
 """Shared Snowflake connection factory. Reads from st.secrets (Streamlit Cloud) or .env (local)."""
 
 import os
+import textwrap
 from pathlib import Path
 
 import snowflake.connector
@@ -23,6 +24,16 @@ def _resolve_key_path(raw: str) -> Path:
     if candidate.is_file():
         return candidate
     raise FileNotFoundError(f"Private key not found: {raw} (tried cwd and {_PROJECT_ROOT})")
+
+
+def _normalize_pem(key_str: str) -> str:
+    """Accept full PEM or raw base64 and return valid PEM."""
+    key_str = key_str.strip()
+    if key_str.startswith("-----"):
+        return key_str
+    # raw base64 — wrap at 64 chars and add PEM headers
+    wrapped = "\n".join(textwrap.wrap(key_str, 64))
+    return f"-----BEGIN PRIVATE KEY-----\n{wrapped}\n-----END PRIVATE KEY-----"
 
 
 def _pem_to_der(pem_bytes: bytes, passphrase: str = None) -> bytes:
@@ -72,7 +83,8 @@ def get_connection(**overrides):
             _resolve_key_path(key_path).read_bytes(), passphrase
         )
     elif private_key_pem:
-        params["private_key"] = _pem_to_der(private_key_pem.encode(), passphrase)
+        pem_str = _normalize_pem(private_key_pem)
+        params["private_key"] = _pem_to_der(pem_str.encode(), passphrase)
     elif password:
         params["password"] = password
     else:
