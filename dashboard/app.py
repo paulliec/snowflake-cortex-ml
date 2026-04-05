@@ -53,17 +53,15 @@ _TITLE_CASE_COLS = {"ROLE", "DEPARTMENT", "REGION", "EMPLOYEE_NAME"}
 
 
 def _classify_risk(score):
-    """Assign risk tier, time window, and confidence band from churn score."""
+    """Assign risk tier and time window from churn score."""
     if pd.isna(score):
-        return pd.Series(["—", "—", None, None])
-    if score >= 0.70:
-        band = 0.08
-        return pd.Series(["🔴 Act Now", "< 90 days", band, f"{score:.0%} ± 8%"])
-    if score >= 0.40:
-        band = 0.15
-        return pd.Series(["🟡 Early Warning", "3-6 months", band, f"{score:.0%} ± 15%"])
-    band = 0.20
-    return pd.Series(["🟢 Stable", "Stable", band, f"{score:.0%} ± 20%"])
+        return pd.Series(["—", "—", "—"])
+    s = float(score)
+    if s >= 0.70:
+        return pd.Series(["🔴 Act Now", "< 90 days", "High Risk — Act Now"])
+    if s >= 0.40:
+        return pd.Series(["🟡 Early Warning", "3-6 months", "Early Warning — Monitor"])
+    return pd.Series(["🟢 Stable", "Stable", "Stable"])
 
 
 def _prepare_employee_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -92,10 +90,10 @@ def _prepare_employee_df(df: pd.DataFrame) -> pd.DataFrame:
         if col in out.columns:
             out[col] = _title_case_values(out[col])
 
-    # risk tiers and confidence bands
+    # risk tiers
     if "CHURN_RISK_SCORE" in out.columns:
         tier_cols = out["CHURN_RISK_SCORE"].apply(_classify_risk)
-        tier_cols.columns = ["RISK_TIER", "TIME_WINDOW", "_BAND", "RISK_DISPLAY"]
+        tier_cols.columns = ["RISK_TIER", "TIME_WINDOW", "RISK_LABEL"]
         out = pd.concat([out, tier_cols], axis=1)
 
     out.columns = [_pretty_col(c) for c in out.columns]
@@ -159,7 +157,7 @@ def load_feature_importance():
 # ============================================================
 page = st.sidebar.radio(
     "Navigation",
-    ["Overview", "At-Risk Employees — Intervention Required",
+    ["Overview", "Employee Attrition Risk",
      "Feature Importance", "Sentiment Analysis"],
 )
 
@@ -295,7 +293,7 @@ if page == "Overview":
     # -- Workforce Impact Forecast --
     st.markdown("---")
     st.subheader("Expected Attrition by Role and Region")
-    st.caption("Confidence bands widen for lower-certainty tiers — ranges reflect model uncertainty")
+    st.caption("Ranges show scenario spread around each tier threshold — use as a planning signal, not a guarantee")
 
     _all_silver = load_silver()  # unfiltered for forecast
     _forecast_df = _all_silver[_all_silver["Churn Risk Score"].notna()].copy()
@@ -344,9 +342,14 @@ if page == "Overview":
 # ============================================================
 # Page 2: At-Risk Employees
 # ============================================================
-elif page == "At-Risk Employees — Intervention Required":
-    st.title("At-Risk Employees — Intervention Required")
-    st.caption("Employees ranked by 90-Day Attrition Risk Score · confidence bands reflect prediction certainty per tier")
+elif page == "Employee Attrition Risk":
+    st.title("Employee Attrition Risk")
+    st.caption("Employees ranked by 90-Day Attrition Risk Score")
+    st.info(
+        "Risk scores are model predictions intended as a planning signal, "
+        "not a definitive assessment of any individual. Use alongside "
+        "manager judgment and HR context."
+    )
 
     silver = load_silver()
     if silver is None or len(silver) == 0:
@@ -383,7 +386,7 @@ elif page == "At-Risk Employees — Intervention Required":
 
     display_cols = [
         "Employee Id", "Employee Name", "Role", "Department", "Region",
-        "Risk Tier", "Time Window", "Risk Display",
+        "Risk Tier", "Risk Label", "Time Window",
         "Tenure Years", "Manager Rating", "Overtime Hours Monthly",
         "Days Since Last Raise", "Churn Risk Score",
     ]
@@ -399,8 +402,8 @@ elif page == "At-Risk Employees — Intervention Required":
                 max_value=1.0,
                 format="%.3f",
             ),
-            "Risk Display": st.column_config.TextColumn("Score ± Band"),
             "Risk Tier": st.column_config.TextColumn(width="small"),
+            "Risk Label": st.column_config.TextColumn("Assessment"),
             "Time Window": st.column_config.TextColumn(width="small"),
         },
     )
