@@ -1,16 +1,17 @@
-"""Shared Snowflake connection factory. Reads creds from .env."""
+"""Shared Snowflake connection factory. Reads from st.secrets (Streamlit Cloud) or .env (local)."""
 
 import os
 from pathlib import Path
 
 import snowflake.connector
+import streamlit as st
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
 from dotenv import load_dotenv
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# load .env from project root
+# load .env for local dev (no-op if file doesn't exist)
 load_dotenv(_PROJECT_ROOT / ".env")
 
 
@@ -18,18 +19,15 @@ def _resolve_key_path(raw: str) -> Path:
     p = Path(raw)
     if p.is_file():
         return p.resolve()
-    # relative paths are from project root (same folder as .env)
     candidate = (_PROJECT_ROOT / raw).resolve()
     if candidate.is_file():
         return candidate
     raise FileNotFoundError(f"Private key not found: {raw} (tried cwd and {_PROJECT_ROOT})")
 
 
-def _private_key_der(path: Path) -> bytes:
-    raw = path.read_bytes()
-    passphrase = os.environ.get("SNOWFLAKE_PRIVATE_KEY_PASSPHRASE")
+def _pem_to_der(pem_bytes: bytes, passphrase: str = None) -> bytes:
     pw = passphrase.encode() if passphrase else None
-    p_key = serialization.load_pem_private_key(raw, password=pw, backend=default_backend())
+    p_key = serialization.load_pem_private_key(pem_bytes, password=pw, backend=default_backend())
     return p_key.private_bytes(
         encoding=serialization.Encoding.DER,
         format=serialization.PrivateFormat.PKCS8,
@@ -38,25 +36,49 @@ def _private_key_der(path: Path) -> bytes:
 
 
 def get_connection(**overrides):
+    try:
+        # Streamlit Cloud — read from st.secrets
+        sf = st.secrets["snowflake"]
+        account = sf["account"]
+        user = sf["user"]
+        warehouse = sf["warehouse"]
+        database = sf.get("database", "ATTRITION_ML")
+        role = sf.get("role", "ATTRITION_ROLE")
+        private_key_pem = sf.get("private_key")
+        password = sf.get("password")
+        passphrase = sf.get("private_key_passphrase")
+    except (KeyError, FileNotFoundError):
+        # Local dev — read from os.environ / .env
+        account = os.environ["SNOWFLAKE_ACCOUNT"]
+        user = os.environ["SNOWFLAKE_USER"]
+        warehouse = os.environ["SNOWFLAKE_WAREHOUSE"]
+        database = os.environ.get("SNOWFLAKE_DATABASE", "ATTRITION_ML")
+        role = os.environ.get("SNOWFLAKE_ROLE", "ATTRITION_ROLE")
+        private_key_pem = os.environ.get("SNOWFLAKE_PRIVATE_KEY")
+        password = os.environ.get("SNOWFLAKE_PASSWORD")
+        passphrase = os.environ.get("SNOWFLAKE_PRIVATE_KEY_PASSPHRASE")
+
     params = {
-        "account": os.environ["SNOWFLAKE_ACCOUNT"],
-        "user": os.environ["SNOWFLAKE_USER"],
-        "warehouse": os.environ["SNOWFLAKE_WAREHOUSE"],
-        "database": os.environ.get("SNOWFLAKE_DATABASE", "ATTRITION_ML"),
+        "account": account,
+        "user": user,
+        "warehouse": warehouse,
+        "database": database,
+        "role": role,
     }
-    role = os.environ.get("SNOWFLAKE_ROLE")
-    if role:
-        params["role"] = role
 
     key_path = os.environ.get("SNOWFLAKE_PRIVATE_KEY_PATH")
     if key_path:
-        params["private_key"] = _private_key_der(_resolve_key_path(key_path))
-    elif os.environ.get("SNOWFLAKE_PASSWORD"):
-        params["password"] = os.environ["SNOWFLAKE_PASSWORD"]
+        params["private_key"] = _pem_to_der(
+            _resolve_key_path(key_path).read_bytes(), passphrase
+        )
+    elif private_key_pem:
+        params["private_key"] = _pem_to_der(private_key_pem.encode(), passphrase)
+    elif password:
+        params["password"] = password
     else:
         raise ValueError(
-            "Set SNOWFLAKE_PASSWORD or SNOWFLAKE_PRIVATE_KEY_PATH (and optional "
-            "SNOWFLAKE_PRIVATE_KEY_PASSPHRASE) in .env"
+            "Set password or private_key in st.secrets[snowflake], "
+            "or SNOWFLAKE_PASSWORD / SNOWFLAKE_PRIVATE_KEY_PATH in .env"
         )
 
     params.update(overrides)
@@ -68,7 +90,10 @@ ML_MODEL_SCHEMA = "GOLD"
 
 
 def use_ml_schema(cursor):
-    db = os.environ.get("SNOWFLAKE_DATABASE", "ATTRITION_ML")
+    try:
+        db = st.secrets["snowflake"].get("database", "ATTRITION_ML")
+    except (KeyError, FileNotFoundError):
+        db = os.environ.get("SNOWFLAKE_DATABASE", "ATTRITION_ML")
     cursor.execute(f"USE DATABASE {db}")
     cursor.execute(f"USE SCHEMA {ML_MODEL_SCHEMA}")
 

@@ -12,16 +12,16 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-from dotenv import load_dotenv
 
 from pipeline.connection import get_connection as _snowflake_connect
 from pipeline.connection import use_ml_schema
 
-load_dotenv(_ROOT / ".env")
-
 
 def _snowflake_db() -> str:
-    return os.environ.get("SNOWFLAKE_DATABASE", "ATTRITION_ML").strip().strip('"')
+    try:
+        return st.secrets["snowflake"].get("database", "ATTRITION_ML")
+    except (KeyError, FileNotFoundError):
+        return os.environ.get("SNOWFLAKE_DATABASE", "ATTRITION_ML").strip().strip('"')
 
 
 def _read_sql(conn, sql: str) -> pd.DataFrame:
