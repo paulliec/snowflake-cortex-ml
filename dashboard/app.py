@@ -207,7 +207,10 @@ if page == "Overview":
     st.title("Attrition Intelligence — Overview")
     st.caption("Risk tiers: 🔴 Act Now (≥70%, <90 days) · 🟡 Early Warning (40-69%, 3-6 months) · 🟢 Stable (<40%)")
 
-    silver = _apply_sidebar_filters(load_silver())
+    silver = load_silver()
+    if silver is None or len(silver) == 0:
+        st.error("Unable to load data from Snowflake")
+        st.stop()
 
     col1, col2, col3, col4 = st.columns(4)
     total = len(silver)
@@ -228,7 +231,9 @@ if page == "Overview":
             total=("Churned", "count"),
             churned=("Churned", lambda x: (x == "Y").sum()),
         ).reset_index()
-        role_stats["rate"] = role_stats["churned"] / role_stats["total"]
+        role_stats["rate"] = role_stats.apply(
+            lambda r: r["churned"] / r["total"] if r["total"] > 0 else 0, axis=1
+        )
         role_stats = role_stats.sort_values("rate", ascending=True)
 
         fig = px.bar(
@@ -250,7 +255,9 @@ if page == "Overview":
             total=("Churned", "count"),
             churned=("Churned", lambda x: (x == "Y").sum()),
         ).reset_index()
-        region_stats["rate"] = region_stats["churned"] / region_stats["total"]
+        region_stats["rate"] = region_stats.apply(
+            lambda r: r["churned"] / r["total"] if r["total"] > 0 else 0, axis=1
+        )
 
         fig = px.bar(
             region_stats, x="Region", y="rate",
@@ -342,6 +349,10 @@ elif page == "At-Risk Employees — Intervention Required":
     st.caption("Employees ranked by 90-Day Attrition Risk Score · confidence bands reflect prediction certainty per tier")
 
     silver = load_silver()
+    if silver is None or len(silver) == 0:
+        st.error("Unable to load data from Snowflake")
+        st.stop()
+
     scored = silver[silver["Churn Risk Score"].notna()].copy()
 
     if len(scored) == 0:
@@ -363,6 +374,10 @@ elif page == "At-Risk Employees — Intervention Required":
         filtered = filtered[filtered["Role"] == selected_role]
     if selected_region != "All":
         filtered = filtered[filtered["Region"] == selected_region]
+
+    if len(filtered) == 0:
+        st.info("No employees match the selected filters.")
+        st.stop()
 
     top25 = filtered.nlargest(25, "Churn Risk Score")
 
@@ -441,6 +456,10 @@ elif page == "Sentiment Analysis":
     st.caption("Post-separation survey analysis — informs future retention strategy, not current risk scoring")
 
     silver = load_silver()
+    if silver is None or len(silver) == 0:
+        st.error("Unable to load data from Snowflake")
+        st.stop()
+
     churned = silver[silver["Churned"] == "Y"].copy()
 
     if churned["Exit Survey Sentiment"].isna().all():
