@@ -52,14 +52,17 @@ def _title_case_values(s: pd.Series) -> pd.Series:
 _TITLE_CASE_COLS = {"ROLE", "DEPARTMENT", "REGION", "EMPLOYEE_NAME"}
 
 
-def _classify_risk(score):
-    """Assign risk tier and time window from churn score."""
+def _classify_risk(score, p85, p65):
+    """Assign risk tier based on percentile cutoffs from the score distribution.
+
+    Top 15% (above p85) → Act Now, next 20% (p65-p85) → Early Warning, rest → Stable.
+    """
     if pd.isna(score):
         return pd.Series(["—", "—", "—"])
     s = float(score)
-    if s >= 0.70:
+    if s >= p85:
         return pd.Series(["🔴 Act Now", "< 90 days", "High Risk — Act Now"])
-    if s >= 0.40:
+    if s >= p65:
         return pd.Series(["🟡 Early Warning", "3-6 months", "Early Warning — Monitor"])
     return pd.Series(["🟢 Stable", "Stable", "Stable"])
 
@@ -90,11 +93,20 @@ def _prepare_employee_df(df: pd.DataFrame) -> pd.DataFrame:
         if col in out.columns:
             out[col] = _title_case_values(out[col])
 
-    # risk tiers
+    # percentile-based risk tiers
     if "CHURN_RISK_SCORE" in out.columns:
-        tier_cols = out["CHURN_RISK_SCORE"].apply(_classify_risk)
+        scores = out["CHURN_RISK_SCORE"].dropna()
+        if len(scores) > 0:
+            p85 = float(scores.quantile(0.85))
+            p65 = float(scores.quantile(0.65))
+        else:
+            p85, p65 = 0.70, 0.40  # fallback if no scores
+        tier_cols = out["CHURN_RISK_SCORE"].apply(_classify_risk, args=(p85, p65))
         tier_cols.columns = ["RISK_TIER", "TIME_WINDOW", "RISK_LABEL"]
         out = pd.concat([out, tier_cols], axis=1)
+        # stash cutoffs for the forecast section
+        out.attrs["_p85"] = p85
+        out.attrs["_p65"] = p65
 
     out.columns = [_pretty_col(c) for c in out.columns]
     return out
@@ -203,7 +215,7 @@ def _apply_sidebar_filters(df: pd.DataFrame) -> pd.DataFrame:
 # ============================================================
 if page == "Overview":
     st.title("Attrition Intelligence — Overview")
-    st.caption("Risk tiers: 🔴 Act Now (≥70%, <90 days) · 🟡 Early Warning (40-69%, 3-6 months) · 🟢 Stable (<40%)")
+    st.caption("Risk tiers: 🔴 Act Now (top 15%) · 🟡 Early Warning (next 20%) · 🟢 Stable (bottom 65%) — ranked by relative risk")
 
     silver = load_silver()
     if silver is None or len(silver) == 0:
@@ -298,35 +310,35 @@ if page == "Overview":
     _all_silver = load_silver()  # unfiltered for forecast
     _forecast_df = _all_silver[_all_silver["Churn Risk Score"].notna()].copy()
     if len(_forecast_df) > 0 and "Risk Tier" in _forecast_df.columns:
-        # thresholds: high>=0.70, med>=0.40
-        _tiers = [
-            ("🔴 Act Now", 0.70, 0.08, "Next 90 days"),
-            ("🟡 Early Warning", 0.40, 0.15, "3-6 months"),
-        ]
+        _p85 = _all_silver.attrs.get("_p85", 0.70)
+        _p65 = _all_silver.attrs.get("_p65", 0.40)
         _forecast_rows = []
-        for tier_label, threshold, band, timeframe in _tiers:
-            for (role, region), grp in _forecast_df.groupby(["Role", "Region"]):
-                scores = grp["Churn Risk Score"]
-                high_est = int((scores >= (threshold - band)).sum())
-                low_est = int((scores >= (threshold + band)).sum())
-                point_est = int((scores >= threshold).sum())
-                if high_est == 0:
-                    continue
+        # count employees per tier per role+region
+        for (role, region), grp in _forecast_df.groupby(["Role", "Region"]):
+            act_now = int((grp["Risk Tier"] == "🔴 Act Now").sum())
+            early_warn = int((grp["Risk Tier"] == "🟡 Early Warning").sum())
+            if act_now > 0:
                 _forecast_rows.append({
-                    "Tier": tier_label,
+                    "Tier": "🔴 Act Now",
                     "Role": role,
                     "Region": region,
-                    "Expected Loss (Low-High)": f"{low_est}-{high_est} employees",
-                    "Point Est.": point_est,
-                    "_high": high_est,
-                    "Timeframe": timeframe,
+                    "At-Risk Employees": act_now,
+                    "Timeframe": "Next 90 days",
+                })
+            if early_warn > 0:
+                _forecast_rows.append({
+                    "Tier": "🟡 Early Warning",
+                    "Role": role,
+                    "Region": region,
+                    "At-Risk Employees": early_warn,
+                    "Timeframe": "3-6 months",
                 })
 
         if _forecast_rows:
             forecast_table = pd.DataFrame(_forecast_rows)
-            forecast_table = forecast_table.sort_values("_high", ascending=False)
+            forecast_table = forecast_table.sort_values("At-Risk Employees", ascending=False)
             st.dataframe(
-                forecast_table[["Tier", "Role", "Region", "Expected Loss (Low-High)", "Timeframe"]],
+                forecast_table[["Tier", "Role", "Region", "At-Risk Employees", "Timeframe"]],
                 use_container_width=True,
                 hide_index=True,
                 column_config={
@@ -346,9 +358,11 @@ elif page == "Employee Attrition Risk":
     st.title("Employee Attrition Risk")
     st.caption("Employees ranked by 90-Day Attrition Risk Score")
     st.info(
-        "Risk scores are model predictions intended as a planning signal, "
-        "not a definitive assessment of any individual. Use alongside "
-        "manager judgment and HR context."
+        "Risk scores are ranked by relative attrition risk. Employees in the "
+        "top 15% are flagged for immediate attention, the next 20% as early "
+        "warning signals. Scores reflect model predictions on available data "
+        "and should be used alongside manager judgment and HR context — "
+        "not as a definitive assessment of any individual."
     )
 
     silver = load_silver()
