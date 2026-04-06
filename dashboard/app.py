@@ -149,6 +149,40 @@ def load_gold():
     return _read_sql(conn, f"SELECT * FROM {db}.GOLD.EMPLOYEE_ML_READY")
 
 
+@st.cache_data(ttl=60)
+def load_annotations():
+    conn = get_connection()
+    db = _snowflake_db()
+    try:
+        return _read_sql(conn, f"""
+            SELECT EMPLOYEE_ID, ANNOTATION_TYPE, ANNOTATION_TEXT,
+                   CREATED_BY, CREATED_AT
+            FROM {db}.SILVER.HR_ANNOTATIONS
+            WHERE ACTIVE = TRUE
+            ORDER BY CREATED_AT DESC
+        """)
+    except Exception:
+        return pd.DataFrame()
+
+
+def _ensure_annotations_table():
+    """Create HR_ANNOTATIONS if it doesn't exist yet."""
+    conn = get_connection()
+    cur = conn.cursor()
+    db = _snowflake_db()
+    cur.execute(f"""
+        CREATE TABLE IF NOT EXISTS {db}.SILVER.HR_ANNOTATIONS (
+            EMPLOYEE_ID     VARCHAR,
+            ANNOTATION_TYPE VARCHAR,
+            ANNOTATION_TEXT VARCHAR,
+            CREATED_BY      VARCHAR,
+            CREATED_AT      TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
+            ACTIVE          BOOLEAN DEFAULT TRUE
+        )
+    """)
+    cur.close()
+
+
 @st.cache_data(ttl=600)
 def load_feature_importance():
     conn = get_connection()
@@ -170,7 +204,7 @@ def load_feature_importance():
 page = st.sidebar.radio(
     "Navigation",
     ["Overview", "Employee Attrition Risk",
-     "Feature Importance", "Sentiment Analysis"],
+     "HR Annotations", "Feature Importance", "Sentiment Analysis"],
 )
 
 st.sidebar.markdown("---")
@@ -185,6 +219,7 @@ if st.sidebar.button("Refresh data"):
     load_silver.clear()
     load_gold.clear()
     load_feature_importance.clear()
+    load_annotations.clear()
     st.rerun()
 
 with st.sidebar.expander("Data check"):
@@ -398,8 +433,20 @@ elif page == "Employee Attrition Risk":
 
     top25 = filtered.nlargest(25, "Churn Risk Score")
 
+    # annotation indicator
+    annot_df = load_annotations()
+    if len(annot_df) > 0:
+        # latest annotation type per employee
+        annot_latest = annot_df.drop_duplicates(subset=["EMPLOYEE_ID"], keep="first")
+        annot_map = dict(zip(annot_latest["EMPLOYEE_ID"], annot_latest["ANNOTATION_TYPE"]))
+        top25["Notes"] = top25["Employee Id"].map(
+            lambda eid: f"\U0001f4dd {annot_map[eid]}" if eid in annot_map else ""
+        )
+    else:
+        top25["Notes"] = ""
+
     display_cols = [
-        "Employee Id", "Employee Name", "Role", "Department", "Region",
+        "Employee Id", "Employee Name", "Notes", "Role", "Department", "Region",
         "Risk Tier", "Risk Label", "Time Window",
         "Tenure Years", "Manager Rating", "Overtime Hours Monthly",
         "Days Since Last Raise", "Churn Risk Score",
@@ -419,6 +466,7 @@ elif page == "Employee Attrition Risk":
             "Risk Tier": st.column_config.TextColumn(width="small"),
             "Risk Label": st.column_config.TextColumn("Assessment"),
             "Time Window": st.column_config.TextColumn(width="small"),
+            "Notes": st.column_config.TextColumn(width="medium"),
         },
     )
 
@@ -426,7 +474,93 @@ elif page == "Employee Attrition Risk":
 
 
 # ============================================================
-# Page 3: Feature Importance
+# Page 3: HR Annotations
+# ============================================================
+elif page == "HR Annotations":
+    st.title("HR Annotations")
+    st.caption("Add qualitative context to at-risk employees — manager observations, known circumstances, retention actions")
+
+    _ensure_annotations_table()
+
+    silver = load_silver()
+    if silver is None or len(silver) == 0:
+        st.error("Unable to load data from Snowflake")
+        st.stop()
+
+    scored = silver[silver["Churn Risk Score"].notna()].copy()
+    # show Act Now + Early Warning employees
+    at_risk = scored[scored["Risk Tier"].isin(["🔴 Act Now", "🟡 Early Warning"])]
+    at_risk = at_risk.nlargest(50, "Churn Risk Score")
+
+    if len(at_risk) == 0:
+        st.info("No at-risk employees to annotate.")
+        st.stop()
+
+    _ANNOTATION_TYPES = [
+        "Manager flagged disengagement",
+        "Internal transfer requested",
+        "Compensation review overdue",
+        "Recent personal hardship",
+        "Actively interviewing - rumored",
+        "High performer - retention priority",
+        "Other",
+    ]
+
+    annot_df = load_annotations()
+
+    for _, emp in at_risk.iterrows():
+        emp_id = emp["Employee Id"]
+        emp_name = emp.get("Employee Name", emp_id)
+        tier = emp.get("Risk Tier", "")
+        score = emp.get("Churn Risk Score", 0)
+        role = emp.get("Role", "")
+        region = emp.get("Region", "")
+
+        with st.expander(f"{tier} **{emp_name}** — {role}, {region} (score: {score:.3f})"):
+            # existing annotations
+            if len(annot_df) > 0:
+                emp_annots = annot_df[annot_df["EMPLOYEE_ID"] == emp_id]
+                if len(emp_annots) > 0:
+                    for _, a in emp_annots.iterrows():
+                        ts = a.get("CREATED_AT", "")
+                        by = a.get("CREATED_BY", "")
+                        st.markdown(
+                            f"**{a['ANNOTATION_TYPE']}** — {a.get('ANNOTATION_TEXT', '')}  \n"
+                            f"<small>{by} · {ts}</small>",
+                            unsafe_allow_html=True,
+                        )
+                    st.markdown("---")
+
+            # annotation form
+            form_key = f"annot_{emp_id}"
+            with st.form(form_key):
+                atype = st.selectbox("Annotation type", _ANNOTATION_TYPES, key=f"type_{emp_id}")
+                atext = st.text_input("Additional notes (optional)", key=f"text_{emp_id}")
+                submitted = st.form_submit_button("Save annotation")
+                if submitted:
+                    conn = get_connection()
+                    cur = conn.cursor()
+                    db = _snowflake_db()
+                    cur.execute(
+                        f"INSERT INTO {db}.SILVER.HR_ANNOTATIONS "
+                        f"(EMPLOYEE_ID, ANNOTATION_TYPE, ANNOTATION_TEXT, CREATED_BY) "
+                        f"VALUES (%s, %s, %s, %s)",
+                        (emp_id, atype, atext or None, "dashboard_user"),
+                    )
+                    cur.close()
+                    load_annotations.clear()
+                    st.success(f"Annotation saved for {emp_name}")
+                    st.rerun()
+
+    st.markdown("---")
+    st.caption(
+        "Annotations are reviewed at each model retraining cycle and "
+        "high-signal patterns may be incorporated as features in future model versions."
+    )
+
+
+# ============================================================
+# Page: Feature Importance
 # ============================================================
 elif page == "Feature Importance":
     st.title("Feature Importance — What Drives Attrition")
@@ -466,7 +600,7 @@ elif page == "Feature Importance":
 
 
 # ============================================================
-# Page 4: Sentiment Analysis
+# Page: Sentiment Analysis
 # ============================================================
 elif page == "Sentiment Analysis":
     st.title("Exit Survey Sentiment Analysis")
