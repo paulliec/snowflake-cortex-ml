@@ -260,6 +260,27 @@ def generate_records(n: int) -> pd.DataFrame:
         if tenure < 1.5:
             churn_prob += 0.03
 
+        # manager 1:1 cadence — neglected employees churn more
+        days_since_1on1 = int(np.clip(np.random.exponential(40), 7, 180))
+        if days_since_1on1 > 90:
+            churn_prob += 0.05
+        elif days_since_1on1 > 60:
+            churn_prob += 0.02
+
+        # unused PTO — high unused days signals disengagement
+        pto_unused = int(np.clip(np.random.exponential(6), 0, 25))
+        if pto_unused >= 15:
+            churn_prob += 0.04
+        elif pto_unused >= 10:
+            churn_prob += 0.01
+
+        # internal transfer requests — wanting out of current role
+        transfer_reqs = random.choices([0, 1, 2, 3], weights=[0.70, 0.18, 0.08, 0.04])[0]
+        if transfer_reqs >= 2:
+            churn_prob += 0.06
+        elif transfer_reqs == 1:
+            churn_prob += 0.03
+
         # cap it
         churn_prob = min(churn_prob, 0.55)
 
@@ -288,6 +309,9 @@ def generate_records(n: int) -> pd.DataFrame:
             "flight_hours_ytd": flight_hours,
             "overtime_hours_monthly": overtime,
             "days_since_last_raise": days_since_raise,
+            "days_since_last_1on1": days_since_1on1,
+            "pto_days_unused": pto_unused,
+            "internal_transfers_requested": transfer_reqs,
             "team_size": team_size,
             "remote_eligible": remote,
             "hire_date": hire_date_str,

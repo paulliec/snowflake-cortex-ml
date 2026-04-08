@@ -2,8 +2,6 @@
 
 import os
 
-import pandas as pd
-
 from pipeline.connection import get_connection, use_ml_schema
 
 MODEL_NAME = "ATTRITION_CLASSIFIER"
@@ -33,6 +31,9 @@ def predict(conn):
                     'PROMOTIONS_LAST_3_YEARS', PROMOTIONS_LAST_3_YEARS,
                     'OVERTIME_HOURS_MONTHLY', OVERTIME_HOURS_MONTHLY,
                     'DAYS_SINCE_LAST_RAISE', DAYS_SINCE_LAST_RAISE,
+                    'DAYS_SINCE_LAST_1ON1', DAYS_SINCE_LAST_1ON1,
+                    'PTO_DAYS_UNUSED', PTO_DAYS_UNUSED,
+                    'INTERNAL_TRANSFERS_REQUESTED', INTERNAL_TRANSFERS_REQUESTED,
                     'TEAM_SIZE', TEAM_SIZE,
                     'REMOTE_ELIGIBLE', REMOTE_ELIGIBLE,
                     'EXIT_SURVEY_SENTIMENT', EXIT_SURVEY_SENTIMENT
@@ -45,43 +46,13 @@ def predict(conn):
     n_pred = cur.fetchone()[0]
     print(f"  Rows in _PREDICTIONS: {n_pred}")
 
-    # inspect raw PREDICTION variant to get the correct extraction path
-    cur.execute("SELECT PREDICTION FROM _PREDICTIONS LIMIT 1")
-    sample = cur.fetchone()[0]
-    print(f"  Sample PREDICTION variant: {sample}")
-
-    # Cortex ML Classification returns {"class": ..., "probability": {"0": p0, "1": p1}}
-    # but key names match the target column's distinct values — for NUMBER(1,0)
-    # targets, keys may be integers (0/1) not strings ("0"/"1").
-    # Try both paths and pick whichever isn't null.
-    cur.execute("""
-        SELECT
-            PREDICTION:"probability":"1"::FLOAT   AS str_key,
-            PREDICTION['probability'][1]::FLOAT    AS int_key
-        FROM _PREDICTIONS LIMIT 1
-    """)
-    str_val, int_val = cur.fetchone()
-    print(f"  Probability via string key '\"1\"': {str_val}")
-    print(f"  Probability via integer key [1]: {int_val}")
-
-    if str_val is not None and str_val != 0.0 and str_val != 1.0:
-        prob_expr = """p.PREDICTION:"probability":"1"::FLOAT"""
-        print("  Using string key path")
-    elif int_val is not None and int_val != 0.0 and int_val != 1.0:
-        prob_expr = """p.PREDICTION['probability'][1]::FLOAT"""
-        print("  Using integer key path")
-    else:
-        # fallback — try the class probabilities object directly
-        prob_expr = """p.PREDICTION:"probability":"1"::FLOAT"""
-        print("  WARNING: neither path returned a probability — defaulting to string key")
-
     # write risk scores back to Silver
     cur.execute(f"""
         MERGE INTO {db}.SILVER.EMPLOYEE_CLEANSED s
         USING _PREDICTIONS p
         ON s.EMPLOYEE_ID = p.EMPLOYEE_ID
         WHEN MATCHED THEN UPDATE SET
-            s.CHURN_RISK_SCORE = {prob_expr}
+            s.CHURN_RISK_SCORE = p.PREDICTION:"probability":"1"::FLOAT
     """)
 
     updated = cur.rowcount
@@ -92,19 +63,6 @@ def predict(conn):
     """)
     n_scored = cur.fetchone()[0]
     print(f"  Silver rows with CHURN_RISK_SCORE set: {n_scored}")
-
-    # verify scores are real probabilities, not binary 0/1
-    cur.execute(f"""
-        SELECT MIN(CHURN_RISK_SCORE), MAX(CHURN_RISK_SCORE),
-               ROUND(AVG(CHURN_RISK_SCORE), 4),
-               COUNT(DISTINCT ROUND(CHURN_RISK_SCORE, 2))
-        FROM {db}.SILVER.EMPLOYEE_CLEANSED
-        WHERE CHURN_RISK_SCORE IS NOT NULL
-    """)
-    mn, mx, avg, n_distinct = cur.fetchone()
-    print(f"\n  Score stats — min: {mn}  max: {mx}  avg: {avg}  distinct values: {n_distinct}")
-    if n_distinct <= 2:
-        print("  WARNING: only 2 distinct values — scores may still be binary class labels")
 
     # show top 10 highest risk by role
     cur.execute(f"""

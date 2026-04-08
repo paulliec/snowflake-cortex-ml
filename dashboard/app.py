@@ -30,8 +30,17 @@ def _read_sql(conn, sql: str) -> pd.DataFrame:
     return df
 
 
+_COL_DISPLAY_NAMES = {
+    "DAYS_SINCE_LAST_1ON1": "Days Since Last 1:1",
+    "PTO_DAYS_UNUSED": "Unused PTO Days",
+    "INTERNAL_TRANSFERS_REQUESTED": "Internal Transfer Requests",
+}
+
+
 def _pretty_col(name: str) -> str:
     """DAYS_SINCE_LAST_RAISE → Days Since Last Raise"""
+    if name in _COL_DISPLAY_NAMES:
+        return _COL_DISPLAY_NAMES[name]
     return name.replace("_", " ").title()
 
 
