@@ -1,0 +1,44 @@
+name: attrition_semantic_model
+description: Employee attrition prediction data for Meridian Workforce Solutions
+tables:
+  - name: EMPLOYEE_CLEANSED
+    base_table:
+      database: ATTRITION_ML
+      schema: SILVER
+      table: EMPLOYEE_CLEANSED
+    description: Employee records with attrition risk scores and HR annotations
+    columns:
+      - name: EMPLOYEE_ID
+        description: Unique employee identifier
+      - name: EMPLOYEE_NAME
+        description: Employee full name
+      - name: ROLE
+        description: Job role - Pilot, ICU Nurse, Anesthesiologist, Flight Paramedic, Cardiologist, Data Engineer, Security Engineer
+      - name: REGION
+        description: Geographic region - Midwest, Northeast, Southeast, West, Central
+      - name: TENURE_YEARS
+        description: Years employed at the company
+      - name: SALARY
+        description: Annual salary in USD
+      - name: PERFORMANCE_SCORE
+        description: Performance rating 1-5, higher is better
+      - name: MANAGER_RATING
+        description: Manager effectiveness rating 1-5, higher is better
+      - name: DAYS_SINCE_LAST_RAISE
+        description: Number of days since last compensation increase
+      - name: OVERTIME_HOURS_MONTHLY
+        description: Average overtime hours per month
+      - name: PROMOTIONS_LAST_3_YEARS
+        description: Number of promotions in last 3 years
+      - name: DAYS_SINCE_LAST_1ON1
+        description: Days since last manager one-on-one meeting
+      - name: PTO_DAYS_UNUSED
+        description: Unused PTO days - high values may indicate disengagement
+      - name: INTERNAL_TRANSFERS_REQUESTED
+        description: Number of internal transfer requests submitted
+      - name: EXIT_SURVEY_SENTIMENT
+        description: Sentiment score from exit survey text, -1 negative to 1 positive
+      - name: CHURN_RISK_SCORE
+        description: Model predicted probability of attrition, 0 to 1
+      - name: CHURNED
+        description: Whether employee has left - Y yes N no

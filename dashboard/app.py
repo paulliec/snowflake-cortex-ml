@@ -1,5 +1,6 @@
 """Attrition ML Dashboard — Streamlit app connected to Snowflake Gold/Silver layers."""
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -213,7 +214,8 @@ def load_feature_importance():
 page = st.sidebar.radio(
     "Navigation",
     ["Overview", "Employee Attrition Risk",
-     "HR Annotations", "Feature Importance", "Sentiment Analysis"],
+     "HR Annotations", "Feature Importance", "Sentiment Analysis",
+     "Ask the Data"],
 )
 
 st.sidebar.markdown("---")
@@ -685,3 +687,117 @@ elif page == "Sentiment Analysis":
         margin=dict(l=0, r=20, t=10, b=0), height=300,
     )
     st.plotly_chart(fig, use_container_width=True)
+
+
+# ============================================================
+# Page: Ask the Data (Cortex Analyst)
+# ============================================================
+elif page == "Ask the Data":
+    st.title("Ask the Data")
+    st.caption(
+        "Ask questions about attrition risk in plain English. "
+        "Powered by Snowflake Cortex Analyst."
+    )
+
+    _SEMANTIC_MODEL_PATH = _ROOT / "cortex" / "semantic_model.yaml"
+
+    _EXAMPLE_QUESTIONS = [
+        "Which roles have the highest attrition risk?",
+        "How many pilots are at high risk in the next 90 days?",
+        "What factors drive attrition for ICU nurses?",
+        "Which region has the most at-risk employees?",
+        "Show me employees with high overtime and low manager ratings",
+    ]
+
+    def _ask_cortex_analyst(question: str) -> dict:
+        """Send a question to Cortex Analyst and return the parsed response."""
+        semantic_model = _SEMANTIC_MODEL_PATH.read_text()
+        request_body = {
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": question}]}
+            ],
+            "semantic_model": semantic_model,
+        }
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT SNOWFLAKE.CORTEX.ANALYST(%s)",
+            (json.dumps(request_body),),
+        )
+        raw = cur.fetchone()[0]
+        cur.close()
+        return json.loads(raw) if isinstance(raw, str) else raw
+
+    def _render_analyst_response(response: dict):
+        """Display Cortex Analyst response — text, SQL, or both."""
+        content = response.get("message", response).get("content", [])
+        for block in content:
+            btype = block.get("type", "")
+            if btype == "text":
+                st.markdown(block["text"])
+            elif btype == "sql":
+                sql = block["statement"]
+                st.code(sql, language="sql")
+                try:
+                    conn = get_connection()
+                    df = pd.read_sql(sql, conn)
+                    df.columns = [str(c).upper() for c in df.columns]
+                    st.dataframe(df, use_container_width=True, hide_index=True)
+                except Exception as e:
+                    st.error(f"Query failed: {e}")
+
+    # init chat history
+    if "analyst_messages" not in st.session_state:
+        st.session_state.analyst_messages = []
+
+    # example question chips
+    chip_cols = st.columns(len(_EXAMPLE_QUESTIONS))
+    for i, q in enumerate(_EXAMPLE_QUESTIONS):
+        if chip_cols[i].button(q, key=f"chip_{i}", use_container_width=True):
+            st.session_state.analyst_messages.append({"role": "user", "text": q})
+            try:
+                resp = _ask_cortex_analyst(q)
+                st.session_state.analyst_messages.append({"role": "assistant", "response": resp})
+            except Exception:
+                st.session_state.analyst_messages.append({
+                    "role": "assistant",
+                    "text": "Unable to process that question. Try rephrasing or "
+                            "choose one of the example questions above.",
+                })
+            st.rerun()
+
+    # render chat history
+    for msg in st.session_state.analyst_messages:
+        if msg["role"] == "user":
+            with st.chat_message("user"):
+                st.markdown(msg["text"])
+        else:
+            with st.chat_message("assistant"):
+                if "response" in msg:
+                    _render_analyst_response(msg["response"])
+                else:
+                    st.markdown(msg.get("text", ""))
+
+    # chat input
+    if user_input := st.chat_input("Ask a question about your workforce data..."):
+        st.session_state.analyst_messages.append({"role": "user", "text": user_input})
+        with st.chat_message("user"):
+            st.markdown(user_input)
+        with st.chat_message("assistant"):
+            try:
+                resp = _ask_cortex_analyst(user_input)
+                st.session_state.analyst_messages.append({"role": "assistant", "response": resp})
+                _render_analyst_response(resp)
+            except Exception:
+                fallback = (
+                    "Unable to process that question. Try rephrasing or "
+                    "choose one of the example questions above."
+                )
+                st.session_state.analyst_messages.append({"role": "assistant", "text": fallback})
+                st.markdown(fallback)
+
+    st.markdown("---")
+    st.caption(
+        "Cortex Analyst interprets your question and queries the underlying "
+        "data directly. Results reflect the synthetic dataset used in this demo."
+    )
