@@ -42,3 +42,60 @@ tables:
         description: Model predicted probability of attrition, 0 to 1
       - name: CHURNED
         description: Whether employee has left - Y yes N no
+
+verified_queries:
+  - name: high_risk_by_role
+    question: "Which roles have the highest attrition risk?"
+    sql: |
+      SELECT ROLE,
+             COUNT(*) AS TOTAL,
+             SUM(CASE WHEN CHURN_RISK_SCORE > 0.5 THEN 1 ELSE 0 END) AS HIGH_RISK,
+             ROUND(AVG(CHURN_RISK_SCORE), 3) AS AVG_RISK_SCORE
+      FROM ATTRITION_ML.SILVER.EMPLOYEE_CLEANSED
+      WHERE CHURN_RISK_SCORE IS NOT NULL
+      GROUP BY ROLE
+      ORDER BY AVG_RISK_SCORE DESC
+
+  - name: high_risk_pilots
+    question: "How many pilots are at high risk?"
+    sql: |
+      SELECT COUNT(*) AS HIGH_RISK_PILOTS
+      FROM ATTRITION_ML.SILVER.EMPLOYEE_CLEANSED
+      WHERE UPPER(ROLE) = 'PILOT'
+        AND CHURN_RISK_SCORE > 0.5
+
+  - name: region_risk
+    question: "Which region has the most at-risk employees?"
+    sql: |
+      SELECT REGION,
+             COUNT(*) AS AT_RISK_COUNT,
+             ROUND(AVG(CHURN_RISK_SCORE), 3) AS AVG_RISK
+      FROM ATTRITION_ML.SILVER.EMPLOYEE_CLEANSED
+      WHERE CHURN_RISK_SCORE > 0.5
+      GROUP BY REGION
+      ORDER BY AT_RISK_COUNT DESC
+
+  - name: icu_nurse_drivers
+    question: "What factors drive attrition for ICU nurses?"
+    sql: |
+      SELECT
+          ROUND(AVG(DAYS_SINCE_LAST_RAISE)) AS AVG_DAYS_SINCE_RAISE,
+          ROUND(AVG(MANAGER_RATING), 1) AS AVG_MANAGER_RATING,
+          ROUND(AVG(OVERTIME_HOURS_MONTHLY), 1) AS AVG_OVERTIME,
+          ROUND(AVG(DAYS_SINCE_LAST_1ON1)) AS AVG_DAYS_SINCE_1ON1,
+          ROUND(AVG(PTO_DAYS_UNUSED), 1) AS AVG_UNUSED_PTO
+      FROM ATTRITION_ML.SILVER.EMPLOYEE_CLEANSED
+      WHERE UPPER(ROLE) = 'ICU NURSE'
+        AND CHURN_RISK_SCORE > 0.5
+
+  - name: high_overtime_low_rating
+    question: "Show employees with high overtime and low manager ratings"
+    sql: |
+      SELECT EMPLOYEE_NAME, ROLE, REGION,
+             OVERTIME_HOURS_MONTHLY, MANAGER_RATING,
+             ROUND(CHURN_RISK_SCORE, 3) AS CHURN_RISK_SCORE
+      FROM ATTRITION_ML.SILVER.EMPLOYEE_CLEANSED
+      WHERE OVERTIME_HOURS_MONTHLY > 20
+        AND MANAGER_RATING < 3
+      ORDER BY CHURN_RISK_SCORE DESC
+      LIMIT 25

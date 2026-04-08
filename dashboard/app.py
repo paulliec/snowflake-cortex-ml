@@ -709,8 +709,67 @@ elif page == "Ask the Data":
         "Show me employees with high overtime and low manager ratings",
     ]
 
-    def _ask_cortex_analyst(question: str) -> dict:
-        """Send a question to Cortex Analyst and return the parsed response."""
+    # keyword → fallback SQL for when Cortex Analyst API is unavailable
+    _FALLBACK_QUERIES = {
+        "pilot": """
+            SELECT UPPER(ROLE) AS ROLE, COUNT(*) AS HIGH_RISK_PILOTS,
+                   ROUND(AVG(CHURN_RISK_SCORE), 3) AS AVG_RISK
+            FROM ATTRITION_ML.SILVER.EMPLOYEE_CLEANSED
+            WHERE UPPER(ROLE) = 'PILOT' AND CHURN_RISK_SCORE > 0.5
+            GROUP BY ROLE""",
+        "region": """
+            SELECT REGION, COUNT(*) AS AT_RISK_COUNT,
+                   ROUND(AVG(CHURN_RISK_SCORE), 3) AS AVG_RISK
+            FROM ATTRITION_ML.SILVER.EMPLOYEE_CLEANSED
+            WHERE CHURN_RISK_SCORE > 0.5
+            GROUP BY REGION ORDER BY AT_RISK_COUNT DESC""",
+        "icu": """
+            SELECT ROUND(AVG(DAYS_SINCE_LAST_RAISE)) AS AVG_DAYS_SINCE_RAISE,
+                   ROUND(AVG(MANAGER_RATING), 1) AS AVG_MANAGER_RATING,
+                   ROUND(AVG(OVERTIME_HOURS_MONTHLY), 1) AS AVG_OVERTIME,
+                   ROUND(AVG(DAYS_SINCE_LAST_1ON1)) AS AVG_DAYS_SINCE_1ON1,
+                   ROUND(AVG(PTO_DAYS_UNUSED), 1) AS AVG_UNUSED_PTO
+            FROM ATTRITION_ML.SILVER.EMPLOYEE_CLEANSED
+            WHERE UPPER(ROLE) = 'ICU NURSE' AND CHURN_RISK_SCORE > 0.5""",
+        "nurse": None,  # alias — matched after icu
+        "overtime": """
+            SELECT EMPLOYEE_NAME, ROLE, REGION,
+                   OVERTIME_HOURS_MONTHLY, MANAGER_RATING,
+                   ROUND(CHURN_RISK_SCORE, 3) AS CHURN_RISK_SCORE
+            FROM ATTRITION_ML.SILVER.EMPLOYEE_CLEANSED
+            WHERE OVERTIME_HOURS_MONTHLY > 20 AND MANAGER_RATING < 3
+            ORDER BY CHURN_RISK_SCORE DESC LIMIT 25""",
+    }
+    # default when no keyword matches
+    _FALLBACK_DEFAULT = """
+        SELECT ROLE, COUNT(*) AS TOTAL,
+               SUM(CASE WHEN CHURN_RISK_SCORE > 0.5 THEN 1 ELSE 0 END) AS HIGH_RISK,
+               ROUND(AVG(CHURN_RISK_SCORE), 3) AS AVG_RISK_SCORE
+        FROM ATTRITION_ML.SILVER.EMPLOYEE_CLEANSED
+        WHERE CHURN_RISK_SCORE IS NOT NULL
+        GROUP BY ROLE ORDER BY AVG_RISK_SCORE DESC"""
+
+    def _fallback_query(question: str) -> pd.DataFrame:
+        """Match question keywords to verified SQL and run it."""
+        q = question.lower()
+        sql = None
+        for kw, fallback_sql in _FALLBACK_QUERIES.items():
+            if kw in q and fallback_sql is not None:
+                sql = fallback_sql
+                break
+            # "nurse" alias → reuse icu query
+            if kw in q and fallback_sql is None:
+                sql = _FALLBACK_QUERIES.get("icu", _FALLBACK_DEFAULT)
+                break
+        if sql is None:
+            sql = _FALLBACK_DEFAULT
+        conn = get_connection()
+        df = pd.read_sql(sql, conn)
+        df.columns = [str(c).upper() for c in df.columns]
+        return sql.strip(), df
+
+    def _ask_cortex_analyst(question: str) -> dict | None:
+        """Try Cortex Analyst API. Returns parsed response or None on failure."""
         semantic_model = _SEMANTIC_MODEL_PATH.read_text()
         request_body = {
             "messages": [
@@ -720,13 +779,28 @@ elif page == "Ask the Data":
         }
         conn = get_connection()
         cur = conn.cursor()
-        cur.execute(
-            "SELECT SNOWFLAKE.CORTEX.ANALYST(%s)",
-            (json.dumps(request_body),),
-        )
-        raw = cur.fetchone()[0]
-        cur.close()
-        return json.loads(raw) if isinstance(raw, str) else raw
+        try:
+            cur.execute(
+                "SELECT SNOWFLAKE.CORTEX.COMPLETE('analyst', PARSE_JSON(%s))",
+                (json.dumps(request_body),),
+            )
+            raw = cur.fetchone()[0]
+            return json.loads(raw) if isinstance(raw, str) else raw
+        except Exception:
+            pass
+        # alt syntax
+        try:
+            cur.execute(
+                "SELECT SNOWFLAKE.CORTEX.ANALYST(%s)",
+                (json.dumps(request_body),),
+            )
+            raw = cur.fetchone()[0]
+            return json.loads(raw) if isinstance(raw, str) else raw
+        except Exception as e:
+            st.toast(f"Cortex Analyst unavailable, using verified queries. ({type(e).__name__})")
+            return None
+        finally:
+            cur.close()
 
     def _render_analyst_response(response: dict):
         """Display Cortex Analyst response — text, SQL, or both."""
@@ -746,6 +820,25 @@ elif page == "Ask the Data":
                 except Exception as e:
                     st.error(f"Query failed: {e}")
 
+    def _handle_question(question: str) -> dict:
+        """Try Cortex Analyst, fall back to keyword-matched verified queries."""
+        resp = _ask_cortex_analyst(question)
+        if resp is not None:
+            return {"role": "assistant", "response": resp}
+        # fallback: run verified query directly
+        sql, df = _fallback_query(question)
+        return {"role": "assistant", "fallback_sql": sql, "fallback_df": df}
+
+    def _render_message(msg: dict):
+        """Render a single assistant message."""
+        if "response" in msg:
+            _render_analyst_response(msg["response"])
+        elif "fallback_sql" in msg:
+            st.code(msg["fallback_sql"], language="sql")
+            st.dataframe(msg["fallback_df"], use_container_width=True, hide_index=True)
+        else:
+            st.markdown(msg.get("text", ""))
+
     # init chat history
     if "analyst_messages" not in st.session_state:
         st.session_state.analyst_messages = []
@@ -755,15 +848,7 @@ elif page == "Ask the Data":
     for i, q in enumerate(_EXAMPLE_QUESTIONS):
         if chip_cols[i].button(q, key=f"chip_{i}", use_container_width=True):
             st.session_state.analyst_messages.append({"role": "user", "text": q})
-            try:
-                resp = _ask_cortex_analyst(q)
-                st.session_state.analyst_messages.append({"role": "assistant", "response": resp})
-            except Exception:
-                st.session_state.analyst_messages.append({
-                    "role": "assistant",
-                    "text": "Unable to process that question. Try rephrasing or "
-                            "choose one of the example questions above.",
-                })
+            st.session_state.analyst_messages.append(_handle_question(q))
             st.rerun()
 
     # render chat history
@@ -773,28 +858,17 @@ elif page == "Ask the Data":
                 st.markdown(msg["text"])
         else:
             with st.chat_message("assistant"):
-                if "response" in msg:
-                    _render_analyst_response(msg["response"])
-                else:
-                    st.markdown(msg.get("text", ""))
+                _render_message(msg)
 
     # chat input
     if user_input := st.chat_input("Ask a question about your workforce data..."):
         st.session_state.analyst_messages.append({"role": "user", "text": user_input})
         with st.chat_message("user"):
             st.markdown(user_input)
+        result = _handle_question(user_input)
+        st.session_state.analyst_messages.append(result)
         with st.chat_message("assistant"):
-            try:
-                resp = _ask_cortex_analyst(user_input)
-                st.session_state.analyst_messages.append({"role": "assistant", "response": resp})
-                _render_analyst_response(resp)
-            except Exception:
-                fallback = (
-                    "Unable to process that question. Try rephrasing or "
-                    "choose one of the example questions above."
-                )
-                st.session_state.analyst_messages.append({"role": "assistant", "text": fallback})
-                st.markdown(fallback)
+            _render_message(result)
 
     st.markdown("---")
     st.caption(
