@@ -807,13 +807,12 @@ elif page == "Ask the Data":
         body = {"messages": messages, "semantic_model": semantic_model}
 
         try:
-            resp = _requests.post(url, headers=headers, json=body, timeout=30)
+            resp = _requests.post(url, headers=headers, json=body, timeout=60)
             if resp.status_code == 200:
                 return resp.json()
-            # some accounts use /api/v2/cortex/analyst/message, others /message
-            # try without trailing path component
-        except Exception:
-            pass
+            st.toast(f"Cortex Analyst API returned {resp.status_code}")
+        except Exception as e:
+            st.toast(f"Cortex Analyst REST error: {type(e).__name__}")
         return None
 
     def _call_cortex_analyst_sql(messages: list, semantic_model: str) -> dict | None:

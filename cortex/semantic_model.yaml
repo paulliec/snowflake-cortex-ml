@@ -7,45 +7,94 @@ tables:
       schema: SILVER
       table: EMPLOYEE_CLEANSED
     description: Employee records with attrition risk scores and HR annotations
-    columns:
+    dimensions:
       - name: EMPLOYEE_ID
+        expr: EMPLOYEE_ID
         description: Unique employee identifier
+        data_type: VARCHAR
       - name: EMPLOYEE_NAME
+        expr: EMPLOYEE_NAME
         description: Employee full name
+        data_type: VARCHAR
       - name: ROLE
+        expr: ROLE
         description: Job role - Pilot, ICU Nurse, Anesthesiologist, Flight Paramedic, Cardiologist, Data Engineer, Security Engineer
+        data_type: VARCHAR
       - name: REGION
+        expr: REGION
         description: Geographic region - Midwest, Northeast, Southeast, West, Central
-      - name: TENURE_YEARS
-        description: Years employed at the company
-      - name: SALARY
-        description: Annual salary in USD
-      - name: PERFORMANCE_SCORE
-        description: Performance rating 1-5, higher is better
-      - name: MANAGER_RATING
-        description: Manager effectiveness rating 1-5, higher is better
-      - name: DAYS_SINCE_LAST_RAISE
-        description: Number of days since last compensation increase
-      - name: OVERTIME_HOURS_MONTHLY
-        description: Average overtime hours per month
-      - name: PROMOTIONS_LAST_3_YEARS
-        description: Number of promotions in last 3 years
-      - name: DAYS_SINCE_LAST_1ON1
-        description: Days since last manager one-on-one meeting
-      - name: PTO_DAYS_UNUSED
-        description: Unused PTO days - high values may indicate disengagement
-      - name: INTERNAL_TRANSFERS_REQUESTED
-        description: Number of internal transfer requests submitted
-      - name: EXIT_SURVEY_SENTIMENT
-        description: Sentiment score from exit survey text, -1 negative to 1 positive
-      - name: CHURN_RISK_SCORE
-        description: Model predicted probability of attrition, 0 to 1
+        data_type: VARCHAR
+      - name: DEPARTMENT
+        expr: DEPARTMENT
+        description: Department name
+        data_type: VARCHAR
+      - name: REMOTE_ELIGIBLE
+        expr: REMOTE_ELIGIBLE
+        description: Whether employee is eligible for remote work - Y or N
+        data_type: VARCHAR
       - name: CHURNED
-        description: Whether employee has left - Y yes N no
+        expr: CHURNED
+        description: Whether employee has left the company - Y yes N no
+        data_type: VARCHAR
+    measures:
+      - name: TENURE_YEARS
+        expr: TENURE_YEARS
+        description: Years employed at the company
+        data_type: FLOAT
+      - name: SALARY
+        expr: SALARY
+        description: Annual salary in USD
+        data_type: NUMBER
+      - name: PERFORMANCE_SCORE
+        expr: PERFORMANCE_SCORE
+        description: Performance rating 1-5, higher is better
+        data_type: NUMBER
+      - name: MANAGER_RATING
+        expr: MANAGER_RATING
+        description: Manager effectiveness rating 1-5, higher is better
+        data_type: NUMBER
+      - name: DAYS_SINCE_LAST_RAISE
+        expr: DAYS_SINCE_LAST_RAISE
+        description: Number of days since last compensation increase
+        data_type: NUMBER
+      - name: OVERTIME_HOURS_MONTHLY
+        expr: OVERTIME_HOURS_MONTHLY
+        description: Average overtime hours per month
+        data_type: FLOAT
+      - name: PROMOTIONS_LAST_3_YEARS
+        expr: PROMOTIONS_LAST_3_YEARS
+        description: Number of promotions in last 3 years
+        data_type: NUMBER
+      - name: DAYS_SINCE_LAST_1ON1
+        expr: DAYS_SINCE_LAST_1ON1
+        description: Days since last manager one-on-one meeting
+        data_type: NUMBER
+      - name: PTO_DAYS_UNUSED
+        expr: PTO_DAYS_UNUSED
+        description: Unused PTO days - high values may indicate disengagement
+        data_type: NUMBER
+      - name: INTERNAL_TRANSFERS_REQUESTED
+        expr: INTERNAL_TRANSFERS_REQUESTED
+        description: Number of internal transfer requests submitted
+        data_type: NUMBER
+      - name: EXIT_SURVEY_SENTIMENT
+        expr: EXIT_SURVEY_SENTIMENT
+        description: Sentiment score from exit survey text, ranges from -1 negative to 1 positive
+        data_type: FLOAT
+      - name: CHURN_RISK_SCORE
+        expr: CHURN_RISK_SCORE
+        description: Model predicted probability of employee attrition, 0 low risk to 1 high risk
+        data_type: FLOAT
+      - name: TEAM_SIZE
+        expr: TEAM_SIZE
+        description: Number of people on the employee team
+        data_type: NUMBER
 
 verified_queries:
   - name: high_risk_by_role
     question: "Which roles have the highest attrition risk?"
+    verified_at: 1712000000
+    verified_by: admin
     sql: |
       SELECT ROLE,
              COUNT(*) AS TOTAL,
@@ -58,6 +107,8 @@ verified_queries:
 
   - name: high_risk_pilots
     question: "How many pilots are at high risk?"
+    verified_at: 1712000000
+    verified_by: admin
     sql: |
       SELECT COUNT(*) AS HIGH_RISK_PILOTS
       FROM ATTRITION_ML.SILVER.EMPLOYEE_CLEANSED
@@ -66,6 +117,8 @@ verified_queries:
 
   - name: region_risk
     question: "Which region has the most at-risk employees?"
+    verified_at: 1712000000
+    verified_by: admin
     sql: |
       SELECT REGION,
              COUNT(*) AS AT_RISK_COUNT,
@@ -77,6 +130,8 @@ verified_queries:
 
   - name: icu_nurse_drivers
     question: "What factors drive attrition for ICU nurses?"
+    verified_at: 1712000000
+    verified_by: admin
     sql: |
       SELECT
           ROUND(AVG(DAYS_SINCE_LAST_RAISE)) AS AVG_DAYS_SINCE_RAISE,
@@ -90,6 +145,8 @@ verified_queries:
 
   - name: high_overtime_low_rating
     question: "Show employees with high overtime and low manager ratings"
+    verified_at: 1712000000
+    verified_by: admin
     sql: |
       SELECT EMPLOYEE_NAME, ROLE, REGION,
              OVERTIME_HOURS_MONTHLY, MANAGER_RATING,
