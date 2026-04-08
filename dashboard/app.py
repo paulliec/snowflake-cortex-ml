@@ -693,6 +693,8 @@ elif page == "Sentiment Analysis":
 # Page: Ask the Data (Cortex Analyst)
 # ============================================================
 elif page == "Ask the Data":
+    import requests as _requests
+
     st.title("Ask the Data")
     st.caption(
         "Ask questions about attrition risk in plain English. "
@@ -740,7 +742,6 @@ elif page == "Ask the Data":
             WHERE OVERTIME_HOURS_MONTHLY > 20 AND MANAGER_RATING < 3
             ORDER BY CHURN_RISK_SCORE DESC LIMIT 25""",
     }
-    # default when no keyword matches
     _FALLBACK_DEFAULT = """
         SELECT ROLE, COUNT(*) AS TOTAL,
                SUM(CASE WHEN CHURN_RISK_SCORE > 0.5 THEN 1 ELSE 0 END) AS HIGH_RISK,
@@ -749,17 +750,13 @@ elif page == "Ask the Data":
         WHERE CHURN_RISK_SCORE IS NOT NULL
         GROUP BY ROLE ORDER BY AVG_RISK_SCORE DESC"""
 
-    def _fallback_query(question: str) -> pd.DataFrame:
+    def _fallback_query(question: str):
         """Match question keywords to verified SQL and run it."""
         q = question.lower()
         sql = None
         for kw, fallback_sql in _FALLBACK_QUERIES.items():
-            if kw in q and fallback_sql is not None:
-                sql = fallback_sql
-                break
-            # "nurse" alias → reuse icu query
-            if kw in q and fallback_sql is None:
-                sql = _FALLBACK_QUERIES.get("icu", _FALLBACK_DEFAULT)
+            if kw in q:
+                sql = fallback_sql or _FALLBACK_QUERIES.get("icu", _FALLBACK_DEFAULT)
                 break
         if sql is None:
             sql = _FALLBACK_DEFAULT
@@ -768,15 +765,60 @@ elif page == "Ask the Data":
         df.columns = [str(c).upper() for c in df.columns]
         return sql.strip(), df
 
-    def _ask_cortex_analyst(question: str) -> dict | None:
-        """Try Cortex Analyst API. Returns parsed response or None on failure."""
-        semantic_model = _SEMANTIC_MODEL_PATH.read_text()
-        request_body = {
-            "messages": [
-                {"role": "user", "content": [{"type": "text", "text": question}]}
-            ],
-            "semantic_model": semantic_model,
+    def _get_analyst_host() -> str:
+        """Build the Snowflake account host for REST API calls."""
+        try:
+            acct = st.secrets["snowflake"]["account"]
+        except (KeyError, FileNotFoundError):
+            acct = os.environ.get("SNOWFLAKE_ACCOUNT", "")
+        # account may already include region (e.g. xy12345.us-east-1)
+        acct = acct.strip()
+        if acct.endswith(".snowflakecomputing.com"):
+            return acct
+        return f"{acct}.snowflakecomputing.com"
+
+    def _get_auth_token(conn) -> str | None:
+        """Extract session token from an open snowflake connection."""
+        # snowflake-connector-python stores the token on the rest adapter
+        rest = getattr(conn, "_rest", None) or getattr(conn, "rest", None)
+        if rest is None:
+            return None
+        # try the most common attribute names across connector versions
+        for attr in ("token", "_token", "master_token"):
+            tok = getattr(rest, attr, None)
+            if tok:
+                return tok
+        return None
+
+    def _call_cortex_analyst_rest(messages: list, semantic_model: str) -> dict | None:
+        """POST to the Cortex Analyst REST endpoint with full conversation history."""
+        conn = get_connection()
+        token = _get_auth_token(conn)
+        if not token:
+            return None
+
+        host = _get_analyst_host()
+        url = f"https://{host}/api/v2/cortex/analyst/message"
+        headers = {
+            "Authorization": f'Snowflake Token="{token}"',
+            "Content-Type": "application/json",
+            "Accept": "application/json",
         }
+        body = {"messages": messages, "semantic_model": semantic_model}
+
+        try:
+            resp = _requests.post(url, headers=headers, json=body, timeout=30)
+            if resp.status_code == 200:
+                return resp.json()
+            # some accounts use /api/v2/cortex/analyst/message, others /message
+            # try without trailing path component
+        except Exception:
+            pass
+        return None
+
+    def _call_cortex_analyst_sql(messages: list, semantic_model: str) -> dict | None:
+        """Fallback: call Cortex Analyst via SQL function."""
+        request_body = {"messages": messages, "semantic_model": semantic_model}
         conn = get_connection()
         cur = conn.cursor()
         try:
@@ -788,29 +830,43 @@ elif page == "Ask the Data":
             return json.loads(raw) if isinstance(raw, str) else raw
         except Exception:
             pass
-        # alt syntax
         try:
             cur.execute(
-                "SELECT SNOWFLAKE.CORTEX.ANALYST(%s)",
+                "SELECT SNOWFLAKE.CORTEX.ANALYST(PARSE_JSON(%s))",
                 (json.dumps(request_body),),
             )
             raw = cur.fetchone()[0]
             return json.loads(raw) if isinstance(raw, str) else raw
-        except Exception as e:
-            st.toast(f"Cortex Analyst unavailable, using verified queries. ({type(e).__name__})")
+        except Exception:
             return None
         finally:
             cur.close()
 
-    def _render_analyst_response(response: dict):
-        """Display Cortex Analyst response — text, SQL, or both."""
-        content = response.get("message", response).get("content", [])
+    def _call_analyst(messages: list) -> dict | None:
+        """Try REST API first, then SQL function, return parsed response or None."""
+        semantic_model = _SEMANTIC_MODEL_PATH.read_text()
+        resp = _call_cortex_analyst_rest(messages, semantic_model)
+        if resp is not None:
+            return resp
+        resp = _call_cortex_analyst_sql(messages, semantic_model)
+        if resp is not None:
+            return resp
+        st.toast("Cortex Analyst unavailable — using verified queries.")
+        return None
+
+    def _extract_content(response: dict) -> list:
+        """Pull the content list from whichever response shape we get."""
+        msg = response.get("message", response)
+        return msg.get("content", [])
+
+    def _render_content(content: list):
+        """Render analyst content blocks — text, sql, suggestions."""
         for block in content:
             btype = block.get("type", "")
             if btype == "text":
                 st.markdown(block["text"])
             elif btype == "sql":
-                sql = block["statement"]
+                sql = block.get("statement", block.get("sql", ""))
                 st.code(sql, language="sql")
                 try:
                     conn = get_connection()
@@ -819,56 +875,89 @@ elif page == "Ask the Data":
                     st.dataframe(df, use_container_width=True, hide_index=True)
                 except Exception as e:
                     st.error(f"Query failed: {e}")
+            elif btype == "suggestions":
+                suggestions = block.get("suggestions", [])
+                if suggestions:
+                    st.caption("Follow-up questions:")
+                    cols = st.columns(min(len(suggestions), 3))
+                    for j, s in enumerate(suggestions):
+                        if cols[j % len(cols)].button(s, key=f"suggest_{hash(s)}"):
+                            _submit_question(s)
 
-    def _handle_question(question: str) -> dict:
-        """Try Cortex Analyst, fall back to keyword-matched verified queries."""
-        resp = _ask_cortex_analyst(question)
+    def _submit_question(question: str):
+        """Add user question to history, call analyst, store response, rerun."""
+        # build API message list from conversation history
+        messages = st.session_state.analyst_messages.copy()
+        messages.append({
+            "role": "user",
+            "content": [{"type": "text", "text": question}],
+        })
+
+        # store for display
+        st.session_state.analyst_display.append({"role": "user", "text": question})
+
+        resp = _call_analyst(messages)
         if resp is not None:
-            return {"role": "assistant", "response": resp}
-        # fallback: run verified query directly
-        sql, df = _fallback_query(question)
-        return {"role": "assistant", "fallback_sql": sql, "fallback_df": df}
+            content = _extract_content(resp)
+            # add analyst turn to API message history
+            st.session_state.analyst_messages = messages
+            st.session_state.analyst_messages.append({
+                "role": "analyst",
+                "content": content,
+            })
+            st.session_state.analyst_display.append({
+                "role": "assistant", "content": content,
+            })
+        else:
+            # keyword fallback — no conversation context but always works
+            sql, df = _fallback_query(question)
+            st.session_state.analyst_messages = messages  # keep user turn
+            st.session_state.analyst_display.append({
+                "role": "assistant", "fallback_sql": sql, "fallback_df": df,
+            })
+        st.rerun()
 
-    def _render_message(msg: dict):
-        """Render a single assistant message."""
-        if "response" in msg:
-            _render_analyst_response(msg["response"])
+    def _render_display_msg(msg: dict):
+        """Render a single display message."""
+        if "content" in msg:
+            _render_content(msg["content"])
         elif "fallback_sql" in msg:
             st.code(msg["fallback_sql"], language="sql")
             st.dataframe(msg["fallback_df"], use_container_width=True, hide_index=True)
         else:
             st.markdown(msg.get("text", ""))
 
-    # init chat history
+    # -- session state: API messages (full history for multi-turn) and display messages
     if "analyst_messages" not in st.session_state:
         st.session_state.analyst_messages = []
+    if "analyst_display" not in st.session_state:
+        st.session_state.analyst_display = []
 
-    # example question chips
-    chip_cols = st.columns(len(_EXAMPLE_QUESTIONS))
-    for i, q in enumerate(_EXAMPLE_QUESTIONS):
-        if chip_cols[i].button(q, key=f"chip_{i}", use_container_width=True):
-            st.session_state.analyst_messages.append({"role": "user", "text": q})
-            st.session_state.analyst_messages.append(_handle_question(q))
-            st.rerun()
+    # clear conversation button
+    if st.button("Clear conversation"):
+        st.session_state.analyst_messages = []
+        st.session_state.analyst_display = []
+        st.rerun()
 
-    # render chat history
-    for msg in st.session_state.analyst_messages:
+    # example question chips (only when conversation is empty)
+    if len(st.session_state.analyst_display) == 0:
+        chip_cols = st.columns(len(_EXAMPLE_QUESTIONS))
+        for i, q in enumerate(_EXAMPLE_QUESTIONS):
+            if chip_cols[i].button(q, key=f"chip_{i}", use_container_width=True):
+                _submit_question(q)
+
+    # render conversation
+    for msg in st.session_state.analyst_display:
         if msg["role"] == "user":
             with st.chat_message("user"):
                 st.markdown(msg["text"])
         else:
             with st.chat_message("assistant"):
-                _render_message(msg)
+                _render_display_msg(msg)
 
     # chat input
     if user_input := st.chat_input("Ask a question about your workforce data..."):
-        st.session_state.analyst_messages.append({"role": "user", "text": user_input})
-        with st.chat_message("user"):
-            st.markdown(user_input)
-        result = _handle_question(user_input)
-        st.session_state.analyst_messages.append(result)
-        with st.chat_message("assistant"):
-            _render_message(result)
+        _submit_question(user_input)
 
     st.markdown("---")
     st.caption(
